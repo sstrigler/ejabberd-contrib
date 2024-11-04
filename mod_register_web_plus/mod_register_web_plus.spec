@@ -1,0 +1,5 @@
+author: "Stefan Strigler <stefan at strigler.de>"
+category: "register"
+summary: "Allow registration of accounts with support for email verification"
+home: "https://github.com/processone/ejabberd-contrib/tree/master/"
+url: "git@github.com:processone/ejabberd-contrib.git"
