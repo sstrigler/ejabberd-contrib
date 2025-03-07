@@ -66,3 +66,7 @@ modules:
               - 750
               - 1000
               - 1500
+      - hook: registered_users_num
+        type: histogram
+        labels:
+          - host
