@@ -10,7 +10,7 @@
 
 -export([process/2]).
 
--export([run_own_hooks/1]).
+-export([run_own_hooks/2]).
 
 -include("logger.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
@@ -23,7 +23,7 @@ start(Host, Opts) ->
       ejabberd:start_app(prometheus),
       update_mnesia(get_opt(mnesia, Opts)),
       update_vm(get_opt(vm, Opts)),
-      start_own_hooks_timer(Opts),
+      start_own_hooks_timer(Host, Opts),
       handle_hooks(get_opt(hooks, Opts), Host, subscribe, []),
       ok;
     _ ->
@@ -32,20 +32,17 @@ start(Host, Opts) ->
       {error, Error}
   end.
 
-start_own_hooks_timer(Opts) ->
-    {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Opts]),
+start_own_hooks_timer(Host, Opts) ->
+    {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Host, Opts]),
     put(run_own_hooks_timer, TRef).
 
-run_own_hooks(_Opts) ->
-    lists:foreach(
-      fun(Host) ->
-              case gen_mod:is_loaded(Host, mod_admin_extra) of
-                  false -> ok;
-                  true ->
-                      RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
-                      ejabberd_hooks:run(registered_users_num, [Host, RegisteredUsersNum])
-              end
-      end, ejabberd_option:hosts()),
+run_own_hooks(Host, _Opts) ->
+    case gen_mod:is_loaded(Host, mod_admin_extra) of
+        false -> ok;
+        true ->
+            RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
+            ejabberd_hooks:run(registered_users_num, [RegisteredUsersNum])
+    end,
     ok.
 
 stop(Host) ->
@@ -57,7 +54,7 @@ reload(Host, NewOpts, OldOpts) ->
   timer:cancel(get(run_own_hooks_timer)),
   prometheus_registry:clear(),
   handle_hooks(get_opt(hooks, OldOpts), Host, unsubscribe, []),
-  start_own_hooks_timer(NewOpts),
+  start_own_hooks_timer(Host, NewOpts),
   handle_hooks(get_opt(hooks, NewOpts), Host, subscribe, []),
   update_mnesia(get_opt(mnesia, NewOpts)),
   update_vm(get_opt(vm, NewOpts)),
