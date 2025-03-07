@@ -36,16 +36,19 @@ start(Host, Opts) ->
   end.
 
 start_own_hooks_timer(Host, Opts) ->
-    {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Host, Opts]),
-    put(run_own_hooks_timer, TRef).
+  {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Host, Opts]),
+  put(run_own_hooks_timer, TRef).
 
 run_own_hooks(Host, _Opts) ->
-    case gen_mod:is_loaded(Host, mod_admin_extra) of
-        false -> ok;
-        true ->
-            RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
-            ejabberd_hooks:run(registered_users_num, Host, [RegisteredUsersNum])
-    end,
+  case gen_mod:is_loaded(Host, mod_admin_extra) of
+    false ->
+      ?DEBUG("mod_admin_extra not loaded on ~p", [Host]),
+      ok;
+    true ->
+      RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
+      ?DEBUG("Got registered users num: ~p", [RegisteredUsersNum]),
+      ejabberd_hooks:run(registered_users_num, Host, [RegisteredUsersNum])
+  end,
     ok.
 
 stop(Host) ->
