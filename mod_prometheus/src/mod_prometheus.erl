@@ -6,7 +6,7 @@
   mod_opt_type/1, mod_options/1,
   depends/2]).
 
--export([process_histogram/5, process_counter/5]).
+-export([process_histogram/5, process_counter/5, process_gauge/1]).
 
 -export([process/2]).
 
@@ -41,7 +41,7 @@ run_own_hooks(Host, _Opts) ->
         false -> ok;
         true ->
             RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
-            ejabberd_hooks:run(registered_users_num, [RegisteredUsersNum])
+            ejabberd_hooks:run(registered_users_num, Host, [RegisteredUsersNum])
     end,
     ok.
 
@@ -267,7 +267,6 @@ process_counter(
   LabelNames = maps:get(labels, State, []),
   case lists:member(module, LabelNames) of
     true ->
-      LabelNames = maps:get(labels, State, []),
       Labels = replace_labels(LabelNames, Args, Host, Mod),
       prometheus_counter:inc(Name, Labels);
     _ ->
@@ -294,6 +293,9 @@ process_counter(
 process_counter(#{}=State, _Event, _Host, _Hook, _) ->
   State.
 
+process_gauge({GName, _Host, Value}) ->
+  prometheus_gauge:set(GName, Value).
+
 handle_hooks([HookOpts | Hooks], Host, Action, Metrics) ->
   handle_hooks(Hooks, Host, Action, Metrics ++ handle_hook(HookOpts));
 handle_hooks([], Host, Action, [{Type, Name, MName, Opts, InitArg} | Metrics]) ->
@@ -308,7 +310,9 @@ handle_hooks([], Host, Action, [{Type, Name, MName, Opts, InitArg} | Metrics]) -
         histogram ->
           handle_histogram(Name, MName, Opts, Host, Action, InitArg);
         counter ->
-          handle_counter(Name, MName, Opts, Host, Action, InitArg)
+          handle_counter(Name, MName, Opts, Host, Action, InitArg);
+        gauge ->
+          handle_gauge(Name, MName, Opts, Host, Action, InitArg)
       end
   end,
   handle_hooks([], Host, Action, Metrics);
@@ -359,7 +363,9 @@ handle_hook(#{hook := Name}=Opts) ->
             }
             || #{module := Mod, function := Func}=Callback <- Callbacks
           ]
-      end
+      end;
+    gauge ->
+      [{Type, Name, Name, Opts, #{hook => Name}}]
   end.
 
 handle_histogram(Name, HName, HistogramOpts, Host, Action, State) ->
@@ -407,7 +413,25 @@ handle_counter(Name, HName, CounterOpts, Host, Action, State) ->
       ejabberd_hooks:unsubscribe(Name, Host, ?MODULE, process_counter, InitArg)
   end.
 
-
+handle_gauge(Name, GName, GaugeOpts, Host, Action, State) ->
+  LabelNames = maps:get(labels, GaugeOpts, []),
+  InitArg = State#{name => GName, labels => LabelNames},
+  case Action of
+    subscribe ->
+      prometheus_gauge:declare(
+        [{name, GName}, {help, maps:get(help, GaugeOpts, "No help")}, {labels, LabelNames}]
+       ),
+      ?INFO_MSG("Created new Prometheus gauge for ~p with labels ~p", [GName, LabelNames]),
+      ejabberd_hooks:add(Name, Host, ?MODULE, process_gauge, 10);
+    _ ->
+      try prometheus_gauge:deregister(GName) of
+        _ ->
+          ?INFO_MSG("Removed Prometheus gauge for ~p with labels ~p", [GName, LabelNames])
+      catch _:{unknown_metric, _, _} ->
+        ok
+      end,
+      ejabberd_hooks:delete(Name, Host, ?MODULE, process_gauge, 10)
+  end.
 
 duration_histogram_name(Hook) ->
   list_to_atom(atom_to_list(Hook) ++ "_duration_milliseconds").
