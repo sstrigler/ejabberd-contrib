@@ -302,8 +302,8 @@ process_gauge(State, after_callback, Host, Hook, Callback) ->
 process_gauge(State, _Event, _Host, _Hook, _Callback) ->
   State.
 
-process_gauge({GName, _Host, Value}) ->
-  prometheus_gauge:set(GName, Value).
+process_gauge({GName, Host, Value}) ->
+  prometheus_gauge:set(GName, [Host], Value).
 
 handle_hooks([HookOpts | Hooks], Host, Action, Metrics) ->
   handle_hooks(Hooks, Host, Action, Metrics ++ handle_hook(HookOpts));
