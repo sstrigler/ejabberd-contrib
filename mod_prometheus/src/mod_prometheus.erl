@@ -81,7 +81,7 @@ mod_opt_type(hooks) ->
     econf:options(
       #{
         hook => econf:atom(),
-        type => econf:enum([histogram, counter]),
+        type => econf:enum([histogram, counter, gauge]),
         buckets => econf:list(econf:int(0, 150000)),
         labels => econf:list(econf:enum([host, stanza, module])),
         help => econf:string(),
