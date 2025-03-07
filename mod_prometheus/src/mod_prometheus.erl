@@ -36,6 +36,7 @@ start(Host, Opts) ->
   end.
 
 start_own_hooks_timer(Host, Opts) ->
+  ?DEBUG("starting timer for ~p", [Host]),
   {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Host, Opts]),
   put(run_own_hooks_timer, TRef).
 
