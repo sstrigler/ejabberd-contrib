@@ -300,14 +300,15 @@ process_counter(
 process_counter(#{}=State, _Event, _Host, _Hook, _) ->
   State.
 
-process_gauge(State, after_callback, Host, Hook, Callback) ->
+process_gauge(#{name := GName} = State, after_callback, Host, Hook, {Mod, Func, _Seq, [Value]} = Callback) ->
   ?DEBUG("~s got callback ~p for ~p at state: ~p", [Host, Callback, Hook, State]),
+  prometheus_gauge:set(GName, [Host], Value),
   State;
 process_gauge(State, _Event, _Host, _Hook, _Callback) ->
   State.
 
-process_gauge({GName, Host, Value}) ->
-  prometheus_gauge:set(GName, [Host], Value).
+process_gauge(Value) ->
+  ?DEBUG("callback triggered: ~p", [Value]).
 
 handle_hooks([HookOpts | Hooks], Host, Action, Metrics) ->
   handle_hooks(Hooks, Host, Action, Metrics ++ handle_hook(HookOpts));
@@ -435,7 +436,7 @@ handle_gauge(Name, GName, GaugeOpts, Host, Action, State) ->
         [{name, GName}, {help, maps:get(help, GaugeOpts, "No help")}, {labels, LabelNames}]
        ),
       ?INFO_MSG("Created new Prometheus gauge for ~p with labels ~p", [GName, LabelNames]),
-      ejabberd_hooks:add(Name, Host, fun(Value) -> ?MODULE:process_gauge({GName, Host, Value}) end, 10),
+      ejabberd_hooks:add(Name, Host, ?MODULE, process_gauge, 10),
       ejabberd_hooks:subscribe(Name, Host, ?MODULE, process_gauge, InitArg);
     _ ->
       try prometheus_gauge:deregister(GName) of
