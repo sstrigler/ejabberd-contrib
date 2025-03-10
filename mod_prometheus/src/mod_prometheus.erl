@@ -58,7 +58,8 @@ run_own_hooks(Host, Opts) ->
    end,
     [ {registered_users_num, stats, [<<"registeredusers">>, host], raw}
     , {spammers_num, spammers, [], list}
-    , {spam_filter_cache_size, get_spam_filter_cache, [host], list}]),
+    , {spam_filter_cache_size, get_spam_filter_cache, [host], list}
+    , {uptime_seconds, stats, [<<"uptimeseconds">>], raw}]),
   receive
     stop ->
       ?DEBUG("run own hooks received stop", []),
