@@ -49,15 +49,15 @@ stop_own_hooks() ->
 
 run_own_hooks(Host, Opts) ->
   ?DEBUG("running own hooks for ~p", [Host]),
-  case gen_mod:is_loaded(Host, mod_admin_extra) of
-    false ->
-      ?DEBUG("mod_admin_extra not loaded on ~p", [Host]),
-      ok;
-    true ->
-      RegisteredUsersNum = mod_admin_extra:stats(<<"registeredusers">>, Host),
-      ?DEBUG("Got registered users num: ~p", [RegisteredUsersNum]),
-      ejabberd_hooks:run(registered_users_num, Host, [RegisteredUsersNum])
-  end,
+  lists:foreach(
+    fun({Hook, Cmd, Args, Type}) ->
+        Res = ejabberdctl(Cmd, Args ++ [Host], Type),
+        ?DEBUG("Got result for command ~p on ~s: ~p", [Cmd, Host, Res]),
+        ejabberd_hooks:run(Hook, Host, [Res])
+   end,
+    [ {registered_users_num, stats, [<<"registeredusers">>], raw}
+    , {spammers_num, spammers, [], list}
+    , {spam_filter_cache_size, get_spam_filter_cache, [], list}]),
   receive
     stop ->
       ?DEBUG("run own hooks received stop", []),
@@ -66,6 +66,11 @@ run_own_hooks(Host, Opts) ->
     1000 ->
       run_own_hooks(Host, Opts)
   end.
+
+ejabberdctl(Cmd, Args, raw) ->
+  ejabberd_commands:execute_command2(Cmd, Args, #{caller_module => ejabberd_ctl}, 10000);
+ejabberdctl(Cmd, Args, list) ->
+  length(ejabberdctl(Cmd, Args, raw)).
 
 stop(Host) ->
   stop_own_hooks(),
