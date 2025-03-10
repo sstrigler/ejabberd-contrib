@@ -60,6 +60,7 @@ run_own_hooks(Host, Opts) ->
   end,
   receive
     stop ->
+      ?DEBUG("run own hooks received stop", []),
       ok
   after
     1000 ->
