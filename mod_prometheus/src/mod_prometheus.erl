@@ -50,14 +50,15 @@ stop_own_hooks() ->
 run_own_hooks(Host, Opts) ->
   ?DEBUG("running own hooks for ~p", [Host]),
   lists:foreach(
-    fun({Hook, Cmd, Args, Type}) ->
-        Res = ejabberdctl(Cmd, Args ++ [Host], Type),
+    fun({Hook, Cmd, Args0, Type}) ->
+        Args = replace_host_in_args(Args0, Host, []),
+        Res = ejabberdctl(Cmd, Args, Type),
         ?DEBUG("Got result for command ~p on ~s: ~p", [Cmd, Host, Res]),
         ejabberd_hooks:run(Hook, Host, [Res])
    end,
-    [ {registered_users_num, stats, [<<"registeredusers">>], raw}
+    [ {registered_users_num, stats, [<<"registeredusers">>, host], raw}
     , {spammers_num, spammers, [], list}
-    , {spam_filter_cache_size, get_spam_filter_cache, [], list}]),
+    , {spam_filter_cache_size, get_spam_filter_cache, [host], list}]),
   receive
     stop ->
       ?DEBUG("run own hooks received stop", []),
@@ -66,6 +67,13 @@ run_own_hooks(Host, Opts) ->
     1000 ->
       run_own_hooks(Host, Opts)
   end.
+
+replace_host_in_args([], _Host, Res) ->
+  lists:reverse(Res);
+replace_host_in_args([host | Args], Host, Res) ->
+  replace_host_in_args(Args, Host, [Host | Res]);
+replace_host_in_args([Arg | Args], Host, Res) ->
+  replace_host_in_args(Args, Host, [Arg | Res]).
 
 ejabberdctl(Cmd, Args, raw) ->
   ejabberd_commands:execute_command2(Cmd, Args, #{caller_module => ejabberd_ctl}, 10000);
