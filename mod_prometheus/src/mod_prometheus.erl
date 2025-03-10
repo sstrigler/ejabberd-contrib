@@ -40,8 +40,12 @@ start_own_hooks(Host, Opts) ->
   {ok, Pid}.
 
 stop_own_hooks() ->
-  Pid = get(run_own_hooks_pid),
-  Pid ! stop.
+  case get(run_own_hooks_pid) of
+    Pid when is_pid(Pid) ->
+      Pid ! stop;
+    _Other ->
+      ok
+  end.
 
 run_own_hooks(Host, Opts) ->
   ?DEBUG("running own hooks for ~p", [Host]),
