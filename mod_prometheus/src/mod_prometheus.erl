@@ -35,7 +35,7 @@ start(Host, Opts) ->
   end.
 
 start_own_hooks(Host, Opts) ->
-  {ok, Pid} = spawn_link(fun() -> run_own_hooks(Host, Opts) end),
+  Pid = spawn_link(fun() -> run_own_hooks(Host, Opts) end),
   put(run_own_hooks_pid, Pid),
   {ok, Pid}.
 
