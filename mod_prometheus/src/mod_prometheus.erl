@@ -6,7 +6,7 @@
   mod_opt_type/1, mod_options/1,
   depends/2]).
 
--export([process_histogram/5
+-export([ process_histogram/5
         , process_counter/5
         , process_gauge/5
         , process_gauge/1]).
@@ -26,21 +26,25 @@ start(Host, Opts) ->
       ejabberd:start_app(prometheus),
       update_mnesia(get_opt(mnesia, Opts)),
       update_vm(get_opt(vm, Opts)),
-      start_own_hooks_timer(Host, Opts),
       handle_hooks(get_opt(hooks, Opts), Host, subscribe, []),
-      ok;
+      start_own_hooks(Host, Opts);
     _ ->
       Error = "Hook subscriber is not supported. Please Upgrade Ejabberd.",
       ?ERROR_MSG(Error, []),
       {error, Error}
   end.
 
-start_own_hooks_timer(Host, Opts) ->
-  ?DEBUG("starting timer for ~p", [Host]),
-  {ok, TRef} = timer:apply_repeatedly(1000, ?MODULE, run_own_hooks, [Host, Opts]),
-  put(run_own_hooks_timer, TRef).
+start_own_hooks(Host, Opts) ->
+  {ok, Pid} = spawn_link(fun() -> run_own_hooks(Host, Opts) end),
+  put(run_own_hooks_pid, Pid),
+  {ok, Pid}.
 
-run_own_hooks(Host, _Opts) ->
+stop_own_hooks() ->
+  Pid = get(run_own_hooks_pid),
+  Pid ! stop.
+
+run_own_hooks(Host, Opts) ->
+  ?DEBUG("running own hooks for ~p", [Host]),
   case gen_mod:is_loaded(Host, mod_admin_extra) of
     false ->
       ?DEBUG("mod_admin_extra not loaded on ~p", [Host]),
@@ -50,18 +54,24 @@ run_own_hooks(Host, _Opts) ->
       ?DEBUG("Got registered users num: ~p", [RegisteredUsersNum]),
       ejabberd_hooks:run(registered_users_num, Host, [RegisteredUsersNum])
   end,
-    ok.
+  receive
+    stop ->
+      ok
+  after
+    1000 ->
+      run_own_hooks(Host, Opts)
+  end.
 
 stop(Host) ->
-  timer:cancel(get(run_own_hooks_timer)),
+  stop_own_hooks(),
   handle_hooks(get_opt(hooks, Host), Host, unsubscribe, []),
   ok.
 
 reload(Host, NewOpts, OldOpts) ->
-  timer:cancel(get(run_own_hooks_timer)),
+  stop_own_hooks(),
   prometheus_registry:clear(),
   handle_hooks(get_opt(hooks, OldOpts), Host, unsubscribe, []),
-  start_own_hooks_timer(Host, NewOpts),
+  start_own_hooks(Host, NewOpts),
   handle_hooks(get_opt(hooks, NewOpts), Host, subscribe, []),
   update_mnesia(get_opt(mnesia, NewOpts)),
   update_vm(get_opt(vm, NewOpts)),
