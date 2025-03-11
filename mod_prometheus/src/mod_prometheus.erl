@@ -50,16 +50,15 @@ stop_own_hooks() ->
 run_own_hooks(Host, Opts) ->
   ?DEBUG("running own hooks for ~p", [Host]),
   lists:foreach(
-    fun({Hook, Cmd, Args0, Type}) ->
-        Args = replace_host_in_args(Args0, Host, []),
-        Res = ejabberdctl(Cmd, Args, Type),
-        ?DEBUG("Got result for command ~p on ~s: ~p", [Cmd, Host, Res]),
-        ejabberd_hooks:run(Hook, Host, [Res])
-   end,
-    [ {registered_users_num, stats, [<<"registeredusers">>, host], raw}
-    , {spammers_num, spammers, [], list}
-    , {spam_filter_cache_size, get_spam_filter_cache, [host], list}
-    , {uptime_seconds, stats, [<<"uptimeseconds">>], raw}]),
+    fun(#{type := gauge, hook := Hook, command := Cmd} = Opt) ->
+        Args = replace_host_in_args(maps:get(args, Opt, []), Host, []),
+        Res = ejabberdctl(Cmd, Args, maps:get(result_type, Opt, raw)),
+        ?DEBUG("Got result for command ~p with args ~p on ~s: ~p", [Cmd, Args, Host, Res]),
+        ejabberd_hooks:run(Hook, Host, [Res]);
+       (_) -> noop
+    end,
+    maps:get(hooks, Opts)
+   ),
   receive
     stop ->
       ?DEBUG("run own hooks received stop", []),
@@ -121,6 +120,9 @@ mod_opt_type(hooks) ->
         buckets => econf:list(econf:int(0, 150000)),
         labels => econf:list(econf:enum([host, stanza, module])),
         help => econf:string(),
+        command => econf:atom(),
+        args => econf:list(econf:either(host, econf:binary())),
+        result_type => econf:enum([raw, list]),
         collect => econf:either(
           all,
           econf:list(
@@ -329,9 +331,11 @@ process_counter(
 process_counter(#{}=State, _Event, _Host, _Hook, _) ->
   State.
 
-process_gauge(#{name := GName} = State, after_callback, Host, Hook, {Mod, Func, _Seq, [Value]} = Callback) ->
+process_gauge(#{name := GName, hook := Hook} = State, after_callback, Host, Hook, {Mod, _Func, _Seq, Args} = Callback) ->
+  LabelNames = maps:get(labels, State, []),
+  Labels = replace_labels(LabelNames, Args, Host, Mod),
   ?DEBUG("~s got callback ~p for ~p at state: ~p", [Host, Callback, Hook, State]),
-  prometheus_gauge:set(GName, [Host], Value),
+  prometheus_gauge:set(GName, Labels, hd(Args)),
   State;
 process_gauge(State, _Event, _Host, _Hook, _Callback) ->
   State.

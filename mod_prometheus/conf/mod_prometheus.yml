@@ -67,6 +67,17 @@ modules:
               - 1000
               - 1500
       - hook: registered_users_num
-        type: histogram
+        type: gauge
+        help: "Number of registered users per host"
         labels:
           - host
+        command: stats
+        args:
+          - "registeredusers"
+          - host
+      - hook: ejabberd_uptime
+        type: gauge
+        help: "Uptime in seconds"
+        command: stats
+        args:
+          - "uptimeseconds"
