@@ -474,15 +474,17 @@ try_decode_jid(S) ->
     end.
 
 -spec filter_jid(ljid(), jid_set(), state()) -> {ham | spam, state()}.
-filter_jid(From, Set, State) ->
+filter_jid(From, Set, #state{host = Host} = State) ->
     case sets:is_element(From, Set) of
 	true ->
 	    ?DEBUG("Spam JID found: ~s", [jid:encode(From)]),
+            ejabberd_hooks:run(spam_found, Host, [{jid, From}]),
 	    {spam, State};
 	false ->
 	    case cache_lookup(From, State) of
 		{true, State1} ->
 		    ?DEBUG("Spam JID found: ~s", [jid:encode(From)]),
+                    ejabberd_hooks:run(spam_found, Host, [{jid, From}]),
 		    {spam, State1};
 		{false, State1} ->
 		    ?DEBUG("JID not listed: ~s", [jid:encode(From)]),
@@ -493,10 +495,11 @@ filter_jid(From, Set, State) ->
 -spec filter_body({urls, [url()]} | {jids, [ljid()]} | none,
 		  url_set() | jid_set(), jid(), state())
       -> {ham | spam, state()}.
-filter_body({_, Addrs}, Set, From, State) ->
+filter_body({_, Addrs}, Set, From, #state{host = Host} = State) ->
     case lists:any(fun(Addr) -> sets:is_element(Addr, Set) end, Addrs) of
 	true ->
 	    ?DEBUG("Spam addresses found: ~p", [Addrs]),
+            ejabberd_hooks:run(spam_found, Host, [{body, Addrs}]),
 	    {spam, cache_insert(From, State)};
 	false ->
 	    ?DEBUG("Addresses not listed: ~p", [Addrs]),
