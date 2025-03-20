@@ -25,6 +25,7 @@
 
 -module(mod_spam_filter).
 -author('holger@zedat.fu-berlin.de').
+-author('stefan@strigler.de').
 
 -behaviour(gen_server).
 -behaviour(gen_mod).
@@ -47,16 +48,18 @@
 	 code_change/3]).
 
 %% ejabberd_hooks callbacks.
--export([s2s_in_handle_info/2,
+-export([pubsub_event_handler/1,
+	 s2s_in_handle_info/2,
 	 s2s_receive_packet/1,
 	 sm_receive_packet/1,
 	 reopen_log/0]).
 
 %% ejabberd_commands callbacks.
--export([get_commands_spec/0, reload_spam_filter_files/1,
+-export([get_blocked_domains/1, get_commands_spec/0, reload_spam_filter_files/1,
 	 get_spam_filter_cache/1, expire_spam_filter_cache/2,
 	 drop_from_spam_filter_cache/2]).
 
+-include("mod_spam_filter.hrl").
 -include("ejabberd_commands.hrl").
 -include("logger.hrl").
 -include_lib("xmpp/include/xmpp.hrl").
@@ -69,14 +72,6 @@
 -type jid_set() :: sets:set(ljid()).
 -type url_set() :: sets:set(url()).
 -type s2s_in_state() :: ejabberd_s2s_in:state().
-
--record(state,
-	{host = <<>>          :: binary(),
-	 dump_fd = undefined  :: file:io_device() | undefined,
-	 url_set = sets:new() :: url_set(),
-	 jid_set = sets:new() :: jid_set(),
-	 jid_cache = #{}      :: map(),
-	 max_cache_size = 0   :: non_neg_integer() | unlimited}).
 
 -type state() :: #state{}.
 
@@ -105,6 +100,7 @@ stop(Host) ->
 
 -spec reload(binary(), gen_mod:opts(), gen_mod:opts()) -> ok.
 reload(Host, NewOpts, OldOpts) ->
+    ?DEBUG("reloading", []),
     Proc = get_proc_name(Host),
     gen_server:cast(Proc, {reload, NewOpts, OldOpts}).
 
@@ -128,7 +124,11 @@ mod_opt_type(spam_urls_file) ->
 mod_opt_type(access_spam) ->
     econf:acl();
 mod_opt_type(cache_size) ->
-    econf:pos_int(unlimited).
+    econf:pos_int(unlimited);
+mod_opt_type(rtbl_host) ->
+    econf:either(
+      econf:enum([none]),
+      econf:host()).
 
 -spec mod_options(binary()) -> [{atom(), any()}].
 mod_options(_Host) ->
@@ -136,7 +136,8 @@ mod_options(_Host) ->
      {spam_jids_file, none},
      {spam_urls_file, none},
      {access_spam, none},
-     {cache_size, 10000}].
+     {cache_size, 10000},
+     {rtbl_host, none}].
 
 mod_doc() -> #{}.
 
@@ -159,34 +160,33 @@ init([Host, Opts]) ->
 			       sm_receive_packet, 50),
 	    ejabberd_hooks:add(reopen_log_hook, ?MODULE,
 			       reopen_log, 50),
-	    DumpFd = if DumpFile == none ->
-			     undefined;
-			true ->
-			     case filelib:ensure_dir(DumpFile) of
-				 ok ->
-				     ok;
-				 {error, Reason} ->
-				     Dirname = filename:dirname(DumpFile),
-				     throw({open, Dirname, Reason})
-			     end,
-			     Modes = [append, raw, binary, delayed_write],
-			     case file:open(DumpFile, Modes) of
-				 {ok, Fd} ->
-				     Fd;
-				 {error, Reason1} ->
-				     throw({open, DumpFile, Reason1})
-			     end
-		     end,
-	    {ok, #state{host = Host,
-			jid_set = JIDsSet,
-			url_set = URLsSet,
-			dump_fd = DumpFd,
-			max_cache_size = gen_mod:get_opt(cache_size, Opts)}}
+	    ejabberd_hooks:add(local_send_to_resource_hook, Host,
+			       ?MODULE, pubsub_event_handler, 50),
+	    InitState0 = #state{host = Host,
+				jid_set = JIDsSet,
+				url_set = URLsSet,
+				max_cache_size = gen_mod:get_opt(cache_size, Opts)},
+	    InitState1 = mod_spam_filter_rtbl:init_rtbl_host(
+			   gen_mod:get_opt(rtbl_host, Opts), InitState0),
+	    InitState = init_open_dump_file(DumpFile, InitState1),
+	    {ok, InitState}
     catch {Op, File, Reason} when Op == open;
 				  Op == read ->
 	    ?CRITICAL_MSG("Cannot ~s ~s: ~s", [Op, File, format_error(Reason)]),
 	    {stop, config_error}
     end.
+
+init_open_dump_file(none, State) ->
+    State;
+init_open_dump_file(DumpFile, State) ->
+    case filelib:ensure_dir(DumpFile) of
+	ok ->
+	    ok;
+	{error, Reason} ->
+	    Dirname = filename:dirname(DumpFile),
+	    throw({open, Dirname, Reason})
+    end,
+    open_dump_file(DumpFile, State).
 
 -spec handle_call(term(), {pid(), term()}, state())
       -> {reply, {spam_filter, term()}, state()} | {noreply, state()}.
@@ -217,6 +217,8 @@ handle_call({drop_from_cache, JID}, _From, State) ->
     {reply, {spam_filter, Result}, State1};
 handle_call(get_cache, _From, #state{jid_cache = Cache} = State) ->
     {reply, {spam_filter, maps:to_list(Cache)}, State};
+handle_call(get_blocked_domains, _From, #state{rtbl_blocked_domains = Domains} = State) ->
+    {reply, {blocked_domains, Domains}, State};
 handle_call(Request, From, State) ->
     ?ERROR_MSG("Got unexpected request from ~p: ~p", [From, Request]),
     {noreply, State}.
@@ -254,20 +256,38 @@ handle_cast({reload, NewOpts, OldOpts}, #state{host = Host} = State) ->
     JIDsFile = gen_mod:get_opt(spam_jids_file, NewOpts),
     URLsFile = gen_mod:get_opt(spam_urls_file, NewOpts),
     {_Result, State3} = reload_files(JIDsFile, URLsFile, State2),
-    {noreply, State3};
+    State4 = mod_spam_filter_rtbl:reload(gen_mod:get_opt(rtbl_host, NewOpts), State3),
+    {noreply, State4};
 handle_cast(reopen_log, State) ->
     {noreply, reopen_dump_file(State)};
+handle_cast({add_blocked_domains, NewItems}, #state{rtbl_blocked_domains = RtblBlockedDomains} = State) ->
+    %% TODO how are items removed?
+    {noreply, State#state{rtbl_blocked_domains = maps:merge(RtblBlockedDomains, NewItems)}};
 handle_cast(Request, State) ->
     ?ERROR_MSG("Got unexpected request from: ~p", [Request]),
     {noreply, State}.
 
 -spec handle_info(term(), state()) -> {noreply, state()}.
+handle_info({iq_reply, IQReply, blocked_domains}, State) ->
+    State2 = mod_spam_filter_rtbl:parse_blocked_domains(State, IQReply),
+    {noreply, State2};
+handle_info({iq_reply, IQReply, subscribe_result}, State) ->
+    ?DEBUG("Got subscribe result: ~p", [IQReply]),
+    State2 = mod_spam_filter_rtbl:parse_subscription(State, IQReply),
+    {noreply, State2};
+handle_info({iq_reply, _IQReply, unsubscribe_result}, State) ->
+    %% FIXME: we should check it's true (of type `result`, not `error`), but at that point, what
+    %% would be do?
+    {noreply, State#state{rtbl_subscribed = false}};
+handle_info(request_blocked_domains, #state{host = Host, rtbl_host = RTBLHost} = State) ->
+    mod_spam_filter_rtbl:request_blocked_domains(RTBLHost, Host),
+    {noreply, State};
 handle_info(Info, State) ->
     ?ERROR_MSG("Got unexpected info: ~p", [Info]),
     {noreply, State}.
 
 -spec terminate(normal | shutdown | {shutdown, term()} | term(), state()) -> ok.
-terminate(Reason, #state{host = Host} = State) ->
+terminate(Reason, #state{host = Host, rtbl_host = RTBLHost} = State) ->
     ?DEBUG("Stopping spam filter process for ~s: ~p", [Host, Reason]),
     DumpFile = gen_mod:get_module_opt(Host, ?MODULE, spam_dump_file),
     DumpFile1 = expand_host(DumpFile, Host),
@@ -278,6 +298,7 @@ terminate(Reason, #state{host = Host} = State) ->
 			  sm_receive_packet, 50),
     ejabberd_hooks:delete(s2s_in_handle_info, Host, ?MODULE,
 			  s2s_in_handle_info, 90),
+    mod_spam_filter_rtbl:unsubscribe(RTBLHost, Host),
     case gen_mod:is_loaded_elsewhere(Host, ?MODULE) of
 	false ->
 	    ejabberd_hooks:delete(reopen_log_hook, ?MODULE,
@@ -294,6 +315,28 @@ code_change(_OldVsn, #state{host = Host} = State, _Extra) ->
 %%--------------------------------------------------------------------
 %% Hook callbacks.
 %%--------------------------------------------------------------------
+-spec pubsub_event_handler(stanza()) -> drop | stanza().
+pubsub_event_handler(#message{from = FromJid,
+			       to = #jid{lserver = LServer,
+					 lresource = <<?SERVICE_JID_PREFIX, _/binary>>}} = Msg) ->
+
+    ?DEBUG("Got RTBL message to:~n~p", [Msg]),
+    From = jid:to_string(FromJid),
+    case gen_mod:get_module_opt(LServer, ?MODULE, rtbl_host) of
+	From ->
+	    NewItems = mod_spam_filter_rtbl:parse_new_blocked_domain(Msg),
+	    Proc = get_proc_name(LServer),
+	    gen_server:cast(Proc, {add_blocked_domains, NewItems}),
+	    %% FIXME what's the difference between `{drop, ...}` and `{stop, {drop, ...}}`?
+	    drop;
+	_Other ->
+	    ?INFO_MSG("Got unexpected message from ~s to rtbl resource:~n~p", [From, Msg]),
+	    Msg
+    end;
+pubsub_event_handler(Acc) ->
+    ?DEBUG("unexpected something on pubsub_event_handler: ~p", [Acc]),
+    Acc.
+
 -spec s2s_receive_packet({stanza() | drop, s2s_in_state()})
       -> {stanza() | drop, s2s_in_state()} | {stop, {drop, s2s_in_state()}}.
 s2s_receive_packet({A, State}) ->
@@ -308,17 +351,18 @@ s2s_receive_packet({A, State}) ->
 sm_receive_packet(drop = Acc) ->
     Acc;
 sm_receive_packet(#message{from = From,
-			     to = #jid{lserver = LServer} = To,
-			     type = Type, body = Body} = Msg
-		    = Acc) when Type /= groupchat,
-				       Type /= error ->
+			   to = #jid{lserver = LServer} = To,
+			   type = Type, body = Body} = Msg)
+  when Type /= groupchat,
+       Type /= error ->
+    ?DEBUG("Got message: ~p", [Msg]),
     case needs_checking(From, To) of
 	true ->
 	    case check_from(LServer, From) of
 		ham ->
 		    case check_body(LServer, From, xmpp:get_text(Body)) of
 			ham ->
-			    Acc;
+			    Msg;
 			spam ->
 			    reject(Msg),
 			    {stop, drop}
@@ -328,22 +372,22 @@ sm_receive_packet(#message{from = From,
 		    {stop, drop}
 	    end;
 	false ->
-	    Acc
+	    Msg
     end;
 sm_receive_packet(#presence{from = From,
 			      to = #jid{lserver = LServer} = To,
-			      type = subscribe} = Presence = Acc) ->
+			      type = subscribe} = Presence) ->
     case needs_checking(From, To) of
 	true ->
 	    case check_from(LServer, From) of
 		ham ->
-		    Acc;
+		    Presence;
 		spam ->
 		    reject(Presence),
 		    {stop, drop}
 	    end;
 	false ->
-	    Acc
+	    Presence
     end;
 sm_receive_packet(Acc) ->
     Acc.
@@ -623,7 +667,7 @@ open_dump_file(Name, State) ->
 	    ?DEBUG("Opened ~s", [Name]),
 	    State#state{dump_fd = Fd};
 	{error, Reason} ->
-	    ?ERROR_MSG("Cannot open ~s: ~s", [Name, file:format_error(Reason)]),
+	    ?ERROR_MSG("Cannot open dump file ~s: ~s", [Name, file:format_error(Reason)]),
 	    State#state{dump_fd = undefined}
     end.
 
@@ -762,7 +806,14 @@ get_commands_spec() ->
 			module = ?MODULE,
 			function = drop_from_spam_filter_cache,
 			args = [{host, binary}, {jid, binary}],
-			result = {res, restuple}}].
+			result = {res, restuple}},
+     #ejabberd_commands{name = get_blocked_domains, tags = [filter],
+			desc = "Get list of domains being blocked",
+			module = ?MODULE,
+			function = get_blocked_domains,
+			args = [{host, binary}],
+			result = {blocked_domains,  {list, {jid, string}}}}
+    ].
 
 -spec reload_spam_filter_files(binary()) -> ok | {error, string()}.
 reload_spam_filter_files(<<"global">>) ->
@@ -789,6 +840,19 @@ reload_spam_filter_files(Host) ->
 		  exit:{timeout, _} ->
 		    {error, "Timeout while querying ejabberd"}
 	    end
+    end.
+
+-spec get_blocked_domains(binary()) -> [binary()].
+get_blocked_domains(Host) ->
+    LServer = jid:nameprep(Host),
+    Proc = get_proc_name(LServer),
+    try gen_server:call(Proc, get_blocked_domains, ?COMMAND_TIMEOUT) of
+	{blocked_domains, Domains} ->
+	    maps:keys(Domains)
+    catch exit:{noproc, _} ->
+	    {error, "Not configured for " ++ binary_to_list(Host)};
+	  exit:{timeout, _} ->
+	    {error, "Timeout while querying ejabberd"}
     end.
 
 -spec get_spam_filter_cache(binary())
