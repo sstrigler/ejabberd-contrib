@@ -219,6 +219,8 @@ handle_call(get_cache, _From, #state{jid_cache = Cache} = State) ->
     {reply, {spam_filter, maps:to_list(Cache)}, State};
 handle_call(get_blocked_domains, _From, #state{rtbl_blocked_domains = Domains} = State) ->
     {reply, {blocked_domains, Domains}, State};
+handle_call({is_blocked_domain, Domain}, _From, #state{rtbl_blocked_domains = Domains} = State) ->
+    {reply, maps:get(Domain, Domains, false), State};
 handle_call(Request, From, State) ->
     ?ERROR_MSG("Got unexpected request from ~p: ~p", [From, Request]),
     {noreply, State}.
@@ -352,45 +354,41 @@ sm_receive_packet(drop = Acc) ->
     Acc;
 sm_receive_packet(#message{from = From,
 			   to = #jid{lserver = LServer} = To,
-			   type = Type, body = Body} = Msg)
+			   type = Type} = Msg)
   when Type /= groupchat,
        Type /= error ->
-    ?DEBUG("Got message: ~p", [Msg]),
-    case needs_checking(From, To) of
-	true ->
-	    case check_from(LServer, From) of
-		ham ->
-		    case check_body(LServer, From, xmpp:get_text(Body)) of
-			ham ->
-			    Msg;
-			spam ->
-			    reject(Msg),
-			    {stop, drop}
-		    end;
-		spam ->
-		    reject(Msg),
-		    {stop, drop}
-	    end;
-	false ->
-	    Msg
-    end;
+    do_check(From, To, LServer, Msg);
 sm_receive_packet(#presence{from = From,
 			      to = #jid{lserver = LServer} = To,
 			      type = subscribe} = Presence) ->
+    do_check(From, To, LServer, Presence);
+sm_receive_packet(Acc) ->
+    Acc.
+
+do_check(From, To, LServer, Stanza) ->
     case needs_checking(From, To) of
 	true ->
-	    case check_from(LServer, From) of
+	    case check_from(LServer, From, To) of
 		ham ->
-		    Presence;
+		    case check_stanza(LServer, From, Stanza) of
+			ham ->
+			    Stanza;
+			spam ->
+			    reject(Stanza),
+			    {stop, drop}
+		    end;
 		spam ->
-		    reject(Presence),
+		    reject(Stanza),
 		    {stop, drop}
 	    end;
 	false ->
-	    Presence
-    end;
-sm_receive_packet(Acc) ->
-    Acc.
+	    Stanza
+    end.
+
+check_stanza(LServer, From, #message{body = Body}) ->
+    check_body(LServer, From, xmpp:get_text(Body));
+check_stanza(_, _, _) ->
+    ham.
 
 -spec s2s_in_handle_info(s2s_in_state(), any())
       -> s2s_in_state() | {stop, s2s_in_state()}.
@@ -428,15 +426,26 @@ needs_checking(From, #jid{lserver = LServer} = To) ->
 	    false
     end.
 
--spec check_from(binary(), jid()) -> ham | spam.
-check_from(Host, From) ->
+-spec check_from(binary(), jid(), jid()) -> ham | spam.
+check_from(Host, From, To) ->
     Proc = get_proc_name(Host),
-    LFrom = jid:remove_resource(jid:tolower(From)),
-    try gen_server:call(Proc, {check_jid, LFrom}) of
-	{spam_filter, Result} ->
-	    Result
+    LFrom = #jid{lserver = FromDomain} = jid:remove_resource(jid:tolower(From)),
+
+    try
+	case gen_server:call(Proc, {is_blocked_domain, FromDomain}) of
+	    true ->
+		case mod_roster:is_subscribed(From, To) of
+		    true -> ham;
+		    false -> spam
+		end;
+	    false ->
+		case gen_server:call(Proc, {check_jid, LFrom}) of
+		    {spam_filter, Result} ->
+			Result
+		end
+	end
     catch exit:{timeout, _} ->
-	    ?WARNING_MSG("Timeout while checking ~s against list of spammers",
+	    ?WARNING_MSG("Timeout while checking ~s against list of blocked domains or spammers",
 			 [jid:encode(From)]),
 	    ham
     end.
